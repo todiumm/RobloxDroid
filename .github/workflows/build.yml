@@ -1,0 +1,65 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK/NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-36 build-tools;35.0.0 ndk;29.0.14206865 cmake;3.22.1'
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Build Box64
+        run: |
+          NDK="$ANDROID_SDK_ROOT/ndk/29.0.14206865"
+          cd external/box64
+          mkdir -p build && cd build
+          cmake -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DANDROID=ON -DARM64=ON -DARM_DYNAREC=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            ..
+          ninja -j$(nproc)
+          cp box64 "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libbox64.so"
+
+      - name: Build x86 libs
+        run: bash scripts/build-x86.sh
+
+      - name: Fetch assets
+        run: bash scripts/fetch-assets.sh
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: assembleDebug
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: polydroid2-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

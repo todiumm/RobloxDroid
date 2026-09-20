@@ -1,0 +1,19 @@
+RobloxDroid
+Copyright (C) 2026 — fork do PolyDroid2
+
+Este programa é software livre: você pode redistribuí-lo e/ou modificá-lo
+sob os termos da GNU General Public License publicada pela Free Software
+Foundation, versão 3 (arquivo LICENSE).
+
+Base:
+  PolyDroid2 (https://github.com/cetotos/PolyDroid2) — © cetotos, GPL-3.0
+  Termux:X11 (https://github.com/termux/termux-x11)   — GPL-3.0 / Apache-2.0
+  Box64 (https://github.com/ptitSeb/box64)            — BSD-3-Clause
+  Mesa/Turnip (https://www.mesa3d.org)                — MIT
+  Winlator (https://github.com/brunodev85/winlator)   — referência de arquitetura
+
+Em runtime, o app baixa de seus repositórios oficiais:
+  Wine (LGPL-2.1, builds de Kron4ek) e DXVK (zlib/libpng)
+  Roblox Studio (proprietário — © Roblox Corporation, canal oficial)
+
+Sem qualquer garantia, conforme GPL-3.0 §15.

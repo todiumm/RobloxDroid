@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- RobloxDroid dark green / black palette -->
+    <color name="rd_black">#000000</color>
+    <color name="rd_surface">#050705</color>
+    <color name="rd_surface_container">#0A0F0A</color>
+    <color name="rd_surface_container_high">#101610</color>
+    <color name="rd_on_surface">#E8F5E9</color>
+    <color name="rd_on_surface_variant">#A8B8A9</color>
+    <color name="rd_primary">#2E7D32</color>
+    <color name="rd_on_primary">#FFFFFF</color>
+    <color name="rd_primary_container">#0D3510</color>
+    <color name="rd_on_primary_container">#B8E6BA</color>
+    <color name="rd_secondary">#4CAF50</color>
+    <color name="rd_on_secondary">#FFFFFF</color>
+    <color name="rd_secondary_container">#173A1A</color>
+    <color name="rd_on_secondary_container">#C4E8C5</color>
+    <color name="rd_outline">#536455</color>
+    <color name="rd_error">#FFB4AB</color>
+    <color name="rd_on_error">#690005</color>
+
+    <!-- Compatibility names used by older resources -->
+    <color name="purple_200">#A5D6A7</color>
+    <color name="purple_500">#2E7D32</color>
+    <color name="purple_700">#1B5E20</color>
+    <color name="teal_200">#81C784</color>
+    <color name="teal_700">#388E3C</color>
+    <color name="black">#000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>
