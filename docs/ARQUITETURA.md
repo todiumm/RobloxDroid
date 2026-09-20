@@ -43,7 +43,7 @@ Duas camadas adicionais (Wine, DXVK), mesmo modelo de orquestração.
 | Login | Chrome Custom Tabs (polytoria.com) → deeplink | **Removido** — login acontece na janela do Studio | Launcher tem botões Instalar/Abrir |
 | DNS/hosts | hosts pré-resolvidos p/ api.polytoria.com | hosts pré-resolvidos p/ domínios roblox.com/rbxcdn | Mesma técnica (Box64 não usa nss do Android) |
 | Shims x86_64 | `BOX64_LD_PRELOAD`: eaccess, pthread_recursive_fix, ctype (Godot), unity_crash_fix, dns_resolver, connect_redirect | Versão enxuta: eaccess, pthread_recursive_fix, ctype_fix, dns_resolver, connect_redirect | Removidos os específicos de Unity/Godot (sem efeito no Wine) |
-| Rootfs | Ubuntu Jammy ARM64 **com cliente embutido** | Ubuntu 22.04 ARM64 **limpo** (cloud-image) | Wine/DXVK/Studio chegam na 1ª execução |
+| Rootfs | Ubuntu Jammy ARM64 **com cliente embutido** | Rootfs **customizado do PolyDroid2**, release `rootfs-1` | Wine/DXVK/Studio chegam na 1ª execução |
 | Tuning Box64 | Perfil Godot/Unity (`DYNAREC_BIGBLOCK=2`, etc.) | Perfil estilo Winlator (`BIGBLOCK=1`, `STRONGMEM=1`, `MMAP32=1`) | Wine é sensível a STRONGMEM/MMAP32 |
 | Logs | session.log + Player.log + godot logs | session.log + `%LOCALAPPDATA%/Roblox/logs` + dxvk-logs | LogReporter adaptado |
 
@@ -60,7 +60,7 @@ Duas camadas adicionais (Wine, DXVK), mesmo modelo de orquestração.
    - monta o ambiente (`guestEnv`): `WINEPREFIX`, `WINEDLLOVERRIDES` (DXVK),
      `VK_ICD_FILENAMES` (Turnip ARM64), `BOX64_*` (perfil Wine), X11, DNS;
    - gera `tmp/launch.sh` e executa via `/system/bin/sh`:
-     `taskset <big cores> libbox64.so /opt/wine/bin/wine "C:\...\RobloxStudioBeta.exe"`.
+     `taskset <big cores> libbox64.so /opt/wine/bin/wine64 "C:\...\RobloxStudioBeta.exe"`.
 4. O Wine emula Win64 (todo o código x86_64 traduzido pelo Box64), o Studio
    inicializa D3D11 → DXVK → Vulkan (Turnip) → ponte de surface → tela.
 5. Teclado/mouse do X11 (com `TouchInputHandler`) operam a UI ribbon do Studio;

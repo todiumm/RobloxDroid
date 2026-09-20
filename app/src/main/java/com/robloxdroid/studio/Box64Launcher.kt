@@ -83,9 +83,14 @@ object Box64Launcher {
     fun findStudioExe(ctx: Context): File? {
         val root = RootFs.rootDir(ctx)
         val versionsDir = File(winePrefixDir(ctx), "drive_c/users/user/AppData/Local/Roblox/Versions")
+        val selected = StudioDownloader.studioInstalledVersion(ctx)
+        if (selected != null) {
+            val active = runCatching { StudioFiles.versionDirectory(versionsDir, selected) }.getOrNull()
+            active?.let { StudioFiles.findExe(it) }?.let { return it }
+        }
         val official = versionsDir.listFiles { f -> f.isDirectory && f.name.startsWith("version-") }
-            ?.mapNotNull { d -> File(d, "RobloxStudioBeta.exe").takeIf { it.exists() } }
-            ?.maxByOrNull { it.lastModified() }
+            ?.sortedByDescending { it.lastModified() }
+            ?.firstNotNullOfOrNull { StudioFiles.findExe(it) }
         if (official != null) return official
         val imported = File(root, "opt/roblox/RobloxStudioBeta.exe")
         if (imported.exists()) return imported
@@ -125,6 +130,8 @@ object Box64Launcher {
         // Limpa resíduos de sessão anterior
         File("$rootPath/tmp").mkdirs()
         File("$rootPath/tmp/.X11-unix").apply { mkdirs(); setReadable(true, false); setExecutable(true, false); setWritable(true, false) }
+        File("$rootPath/tmp/dxvk-logs").mkdirs()
+        File("$rootPath/tmp/dxvk-cache").mkdirs()
         File("$rootPath/dev/shm").apply { mkdirs(); setReadable(true, false); setWritable(true, false); setExecutable(true, false) }
 
         // Aplica ClientAppSettings.json (FFlags do Studio) conforme as preferências
@@ -198,11 +205,12 @@ object Box64Launcher {
 
         val launchScript = File("$rootPath/tmp/launch.sh")
         val envExports = env.entries.joinToString("\n") { (k, v) ->
-            "export $k=\"$v\""
+            "export $k=${StudioFiles.shellQuote(v)}"
         }
 
         val studioWinPath = toWindowsPath(studioExe, prefix)
-        val wineCmd = "\"$nativeDir/libbox64.so\" \"$wine\" \"$studioWinPath\"$gameArgStr"
+        val wineCmd = listOf(box64.absolutePath, wine.absolutePath, studioWinPath)
+            .joinToString(" ") { StudioFiles.shellQuote(it) } + gameArgStr
         val execLine = if (execPrefix.isNotBlank())
             "${execPrefix}/system/bin/true >/dev/null 2>&1 && exec $execPrefix$wineCmd\nexec $wineCmd"
         else
@@ -246,7 +254,7 @@ $execLine
                     stream.bufferedReader().use { reader ->
                         reader.lineSequence().forEach { line ->
                             Log.i(TAG, "[$label] $line")
-                            if (line.startsWith("[")) sessionLog(line)
+                            sessionLog(line)
                         }
                     }
                 } catch (_: java.io.IOException) {
@@ -368,6 +376,7 @@ $execLine
 
             // Ponte nativa (libxvk_droid / vulkan_surface_shim)
             put("ROBLOXDROID_ROOTDIR", rootPath)
+            put("ROBLOXDROID_POLYTORIA2", "1") // enables the bundled ALSA and touch stubs
             put("ROBLOXDROID_NATIVE_DIR", nativeDir)
             val ptrFile = java.io.File(ctx.filesDir, "vulkan_surface_ptr")
             if (ptrFile.exists()) {
@@ -416,7 +425,7 @@ $execLine
     private fun toWindowsPath(exe: File, prefix: File): String {
         // Studio instalado dentro do prefixo → caminho C:\ nativo
         val prefixPath = prefix.absolutePath
-        if (exe.absolutePath.startsWith(prefixPath)) {
+        if (exe.absolutePath.startsWith(prefixPath + File.separator)) {
             val rel = exe.absolutePath.removePrefix(prefixPath).trimStart('/')
             return "C:\\" + rel.replaceFirst("drive_c/", "").replace('/', '\\')
         }

@@ -2,31 +2,32 @@
 
 ## Pré-requisitos
 
-- **Android Studio** (Hedgehog ou mais recente) ou SDK command-line tools
-- **NDK r26+** e **CMake 3.22+** (via SDK Manager)
+- **Android Studio** compatível com AGP 8.13.2 ou SDK command-line tools
+- **NDK 29.0.14206865** e **CMake 3.22.1** (via SDK Manager)
 - JDK 17
 - ~6 GB livres em disco (rootfs + toolchains)
 
-## 1. Rootfs base (já incluído no zip)
+## 1. Rootfs base (download verificado)
 
-O zip do projeto **já vem com `app/src/main/assets/rootfs.tar.xz`** — o MESMO
-rootfs customizado do PolyDroid2 (release `rootfs-1`, SHA-256 verificado no
-script). Ele contém o stack x86_64 multiarch (freetype, X11 client, udev,
-gcrypt, zlib/brotli…) que o Wine e o Studio precisam.
+O rootfs de aproximadamente 119 MB **não fica no Git**. O Gradle executa
+`prepareRootfs` antes de `preBuild`: baixa o arquivo ausente ou corrompido,
+confere SHA-256 e só então publica o asset em
+`app/src/main/assets/rootfs.tar.xz`. Uma cópia válida é reutilizada, inclusive
+sem rede. URL e checksum estão em `rootfs.properties`.
 
-Só rode o script abaixo se você apagou o arquivo do assets:
+Para preparar apenas o asset, sem SDK/NDK:
 
 ```bash
-./scripts/fetch-rootfs.sh
+bash scripts/fetch-rootfs.sh
 ```
 
-> Importante: NÃO troque pelo Ubuntu arm64 vanilla (cloud-image). Além de não
-> ter as libs x86_64 (o Wine fica sem freetype/X11 — Studio sem fontes e
-> wineboot quebrado), a versão v9 do `RootFs` espera o layout do rootfs
-> oficial.
+O script também verifica cópias existentes. Downloads incompletos ou com
+checksum incorreto não substituem o arquivo anterior. A primeira preparação
+precisa de acesso à release `rootfs-1` do PolyDroid2 no GitHub.
 
-> Nota sobre APKs: o `rootfs.tar.xz` (~119 MB) é o maior asset do APK; o
-> `noCompress` no `build.gradle.kts` garante que ele não seja recomprimido.
+Use esse rootfs customizado: ele inclui as bibliotecas x86_64 necessárias.
+Uma imagem Ubuntu ARM64 genérica não é equivalente. O Gradle usa `noCompress`
+para evitar recomprimir o TAR/XZ no APK.
 
 ## 2. Compilar
 
@@ -49,7 +50,7 @@ Todos já estão neste repositório (herdados do PolyDroid2). Se você alterar o
 shims em `app/src/main/cpp/`, recompile-os num Linux x86_64:
 
 ```bash
-./scripts/build-x86.sh     # requer gcc-multilib (destino i386/amd64)
+bash scripts/build-x86.sh # execute em Linux x86_64, não com gcc ARM64 do Termux
 ```
 
 ## 3. Instalar no aparelho
@@ -69,7 +70,7 @@ dependendo do aparelho.
 |---|---|---|
 | `Missing pre-built: …` no Gradle | Binários pré-construídos ausentes | Confirme que `jniLibs` e `assets/glibc-x86_64` não foram limpos |
 | **wineboot sai com código 255** | Executável não-ELF passado ao Box64: `bin/wineboot` do Kron4ek é script `#!/bin/sh` e `bin/wine` é ELF i386 (32 bits) — Box64 só roda x86_64 | Atualize para esta versão: o app agora roda `box64 wine64 wineboot --init` (validação ELF embutida). Se persistir, confira no log qual binário o app tentou executar |
-| wineboot trava em 0% | Sem X server no primeiro boot | Abra pelo botão do launcher (o X11 sobe no GameActivity); se rodar pelo Settings, aguarde — wineboot funciona headless com avisos |
+| wineboot demora na preparação | Inicialização do prefixo ou falha do Wine | A etapa usa progresso indeterminado e limite de 10 minutos; confira `rootfs/tmp/setup_wine.log` para identificar o erro |
 | Studio abre preto | Driver Vulkan fraco / Mali | Configurações → Vulkan driver: alternar `system` ↔ `turnip`; ativar DXVK HUD para ver se há render |
 | Studio fecha ao iniciar | D3D10/OpenGL tentado antes do D3D11 | Confirme que `ClientAppSettings.json` (FFlagDebugGraphicsPreferD3D11) está na pasta do exe |
 | Crash imediato do Box64 | `STRONGMEM` insuficiente p/ o aparelho | Ative "Safe mode" nas configurações (desliga otimizações do dynarec) |
@@ -78,3 +79,15 @@ dependendo do aparelho.
 
 Logs úteis (`adb logcat -s RobloxDroid RobloxDroid-Vulkan Box64`) e o botão de
 envio de logs nas configurações coletam session.log + logs do Studio.
+
+## Testes de regressão
+
+```bash
+python3 scripts/test-fetch-rootfs.py
+./gradlew testDebugUnitTest
+```
+
+Os testes cobrem preparação e integridade do rootfs, extração de ZIP/TAR,
+hard links, links simbólicos, bloqueio de caminhos fora do destino,
+substituição com rollback, localização de imports e patch do socket do Wine.
+A abertura real do Studio, áudio e renderização ainda exigem teste no aparelho.

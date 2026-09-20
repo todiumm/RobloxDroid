@@ -155,7 +155,7 @@ class GameActivity : AppCompatActivity() {
                 } else {
                     appendLog("Frame compositor failed to start!")
                 }
-                vulkanSurfaceReady = true
+                vulkanSurfaceReady = compositorOk
             }
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
             override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -294,6 +294,7 @@ class GameActivity : AppCompatActivity() {
             val started = CmdEntryPoint.start(arrayOf(":0"))
             if (!started) {
                 appendLog("Failed to start X server!")
+                showLaunchFailure("Não foi possível iniciar o servidor X11")
                 return@thread
             }
             appendLog("X server started successfully!")
@@ -335,7 +336,9 @@ class GameActivity : AppCompatActivity() {
                     LorieView.sendWindowChange(renderWidth, renderHeight, 60, null)
                 }
             } else {
-                appendLog("Failed to connect LorieView to X server after 5s!")
+                appendLog("Failed to connect LorieView to X server")
+                showLaunchFailure("Não foi possível conectar a tela ao servidor X11")
+                return@thread
             }
 
             if (overheatDialogShown) {
@@ -343,6 +346,14 @@ class GameActivity : AppCompatActivity() {
                 return@thread
             }
 
+            val surfaceDeadline = android.os.SystemClock.elapsedRealtime() + 10000
+            while (!vulkanSurfaceReady && android.os.SystemClock.elapsedRealtime() < surfaceDeadline && !isFinishing) {
+                Thread.sleep(50)
+            }
+            if (!vulkanSurfaceReady || isFinishing) {
+                if (!isFinishing) showLaunchFailure("A superfície gráfica não ficou pronta")
+                return@thread
+            }
             appendLog("Launching Box64...")
             try {
                 val proc = Box64Launcher.launch(
@@ -359,7 +370,8 @@ class GameActivity : AppCompatActivity() {
                 systemStats.setGamePid(pidOf(proc))
             } catch (e: Exception) {
                 appendLog("Error! ${e.message}")
-                e.printStackTrace()
+                Log.e("RobloxDroid", "Falha ao abrir Studio", e)
+                showLaunchFailure(e.message ?: e.toString())
             }
         }
     }
@@ -438,6 +450,19 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun showLaunchFailure(message: String) {
+        runOnUiThread {
+            if (isFinishing || isDestroyed || crashDialogShown) return@runOnUiThread
+            crashDialogShown = true
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Não foi possível abrir o Studio")
+                .setMessage(message)
+                .setCancelable(false)
+                .setPositiveButton("Voltar") { _, _ -> finish() }
+                .show()
+        }
+    }
 
     private fun showCrashDialog(exitCode: Int) {
         if (crashDialogShown || overheatDialogShown) return

@@ -16,12 +16,10 @@ object RootFs {
     // re-extração e reseta wine/prefixo de instalações antigas (v8 usava o
     // Ubuntu arm64 vanilla, sem libs x86_64).
     private const val VERSION = 9
-    private const val LIBS_VERSION = 10
+    private const val LIBS_VERSION = 11
 
     private val LIB_ASSETS = listOf(
         "turnip/libvulkan_freedreno.so",
-        "turnip/libc++_shared.so",
-        "turnip/libdrm.so.2",
         "xvfb-bundle.bin",
         "glibc-x86_64/libc.so.6",
         "glibc-x86_64/libpthread.so.0",
@@ -157,9 +155,10 @@ object RootFs {
         }
     }
 
+    @Synchronized
     fun extractAll(ctx: Context, onProgress: (Int, Int, Int, String, Long, Long) -> Unit) {
         val needRootfs = !isInstalled(ctx)
-        val needLibs = !areLibsInstalled(ctx)
+        val needLibs = needRootfs || !areLibsInstalled(ctx)
 
         val stages = mutableListOf<Stage>()
         if (needRootfs) {
@@ -174,9 +173,15 @@ object RootFs {
 
         if (needRootfs) {
             val root = rootDir(ctx)
-            if (root.exists()) root.deleteRecursively()
-            root.mkdirs()
-            install(ctx, progress)
+            val staged = File(ctx.filesDir, ".rootfs-install")
+            staged.deleteRecursively()
+            staged.mkdirs()
+            try {
+                install(ctx, staged, progress)
+                ArchiveFiles.replaceDirectory(staged, root)
+            } finally {
+                staged.deleteRecursively()
+            }
             progress.completeStage()
         }
         if (needLibs) {
@@ -185,8 +190,7 @@ object RootFs {
         }
     }
 
-    private fun install(ctx: Context, progress: Progress) {
-        val root = rootDir(ctx)
+    private fun install(ctx: Context, root: File, progress: Progress) {
         root.mkdirs()
 
         Log.i(TAG, "Extracting rootfs...")
@@ -196,31 +200,7 @@ object RootFs {
                 BufferedInputStream(counted, 65536).use { buffered ->
                     XZInputStream(buffered).use { xz ->
                         TarArchiveInputStream(xz).use { tar ->
-                            var entry = tar.nextEntry
-                            while (entry != null) {
-                                val outFile = File(root, entry.name)
-                                if (entry.isDirectory) {
-                                    outFile.mkdirs()
-                                } else if (entry.isSymbolicLink) {
-                                    try {
-                                        val target = java.nio.file.Paths.get(entry.linkName)
-                                        val link = outFile.toPath()
-                                        outFile.parentFile?.mkdirs()
-                                        java.nio.file.Files.createSymbolicLink(link, target)
-                                    } catch (e: Exception) {
-                                        Log.w(TAG, "failed to create symlink: ${entry.name} -> ${entry.linkName}")
-                                    }
-                                } else {
-                                    outFile.parentFile?.mkdirs()
-                                    outFile.outputStream().use { out ->
-                                        tar.copyTo(out)
-                                    }
-                                    if (entry.mode and 0b001_001_001 != 0) {
-                                        outFile.setExecutable(true, false)
-                                    }
-                                }
-                                entry = tar.nextEntry
-                            }
+                            ArchiveFiles.extractTar(tar, root)
                         }
                     }
                 }
@@ -243,6 +223,7 @@ object RootFs {
     }
 
     private fun copyAssetCounted(ctx: Context, asset: String, dest: File, progress: Progress) {
+        dest.parentFile?.mkdirs()
         ctx.assets.open(asset).use { raw ->
             CountingInputStream(raw) { progress.addBytes(it) }.use { counted ->
                 dest.outputStream().use { output -> counted.copyTo(output) }
@@ -259,11 +240,11 @@ object RootFs {
 
         val arm64NativeDir = File("$rootPath/usr/lib/arm64-native")
         arm64NativeDir.mkdirs()
-        for (lib in listOf("libvulkan_freedreno.so", "libc++_shared.so", "libdrm.so.2")) {
+        // libc++ is already packaged in jniLibs; the bundled Turnip has no libdrm dependency.
+        File(nativeDir, "libc++_shared.so").copyTo(File(arm64NativeDir, "libc++_shared.so"), overwrite = true)
+        for (lib in listOf("libvulkan_freedreno.so")) {
             val dest = File(arm64NativeDir, lib)
-            try {
-                copyAssetCounted(ctx, "turnip/$lib", dest, progress)
-            } catch (_: Exception) { }
+            copyAssetCounted(ctx, "turnip/$lib", dest, progress)
             dest.setReadable(true, false)
             dest.setExecutable(true, false)
         }
@@ -279,35 +260,55 @@ object RootFs {
 }
 """)
 
-        val xvfbMarker = File("$rootPath/usr/bin/Xvfb")
+        val xvfbMarker = File(root, ".rd_xvfb_links_fixed")
         if (!xvfbMarker.exists()) {
             try {
                 ctx.assets.open("xvfb-bundle.bin").use { raw ->
                     CountingInputStream(raw) { progress.addBytes(it) }.use { counted ->
                         GZIPInputStream(counted).use { gzip ->
                             TarArchiveInputStream(gzip).use { tar ->
-                                var entry = tar.nextEntry
-                                while (entry != null) {
-                                    val dest = File(rootPath, entry.name)
-                                    if (entry.isDirectory) {
-                                        dest.mkdirs()
-                                    } else {
-                                        dest.parentFile?.mkdirs()
-                                        dest.outputStream().use { out -> tar.copyTo(out) }
-                                        if (entry.name.contains("/bin/")) {
-                                            dest.setExecutable(true, false)
+                                val links = mutableListOf<Pair<File, File>>()
+                                while (true) {
+                                    val entry = tar.nextEntry ?: break
+                                    val dest = ArchiveFiles.resolve(root, entry.name)
+                                    when {
+                                        entry.isDirectory -> dest.mkdirs()
+                                        entry.isSymbolicLink || entry.isLink -> {
+                                            // Absolute links in this Linux bundle refer to the guest root.
+                                            val target = if (entry.linkName.startsWith("/")) entry.linkName.trimStart('/')
+                                                else if (entry.isLink) entry.linkName
+                                                else File(File(entry.name).parent ?: "", entry.linkName).path
+                                            links.add(dest to ArchiveFiles.resolve(root, target))
                                         }
-                                        dest.setReadable(true, false)
+                                        entry.isFile -> {
+                                            dest.parentFile?.mkdirs()
+                                            dest.outputStream().use { tar.copyTo(it) }
+                                            if (entry.mode and 0b001_001_001 != 0) dest.setExecutable(true, false)
+                                            dest.setReadable(true, false)
+                                        }
+                                        else -> throw java.io.IOException("Entrada inválida no Xvfb: ${entry.name}")
                                     }
-                                    entry = tar.nextEntry
+                                }
+                                // Materialize links after their targets, also on filesystems without link(2).
+                                for ((dest, source) in links) {
+                                    dest.parentFile?.mkdirs()
+                                    if (!source.exists()) {
+                                        // The bundle includes a dangling rgb.txt link; keep it guest-relative.
+                                        java.nio.file.Files.deleteIfExists(dest.toPath())
+                                        java.nio.file.Files.createSymbolicLink(dest.toPath(),
+                                            source.relativeTo(dest.parentFile!!).toPath())
+                                    } else if (!dest.exists() || !java.nio.file.Files.isSameFile(dest.toPath(), source.toPath())) {
+                                        source.copyTo(dest, overwrite = true)
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                xvfbMarker.writeText("1")
                 Log.i(TAG, "Extracted Xvfb bundle to rootfs")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to extract Xvfb bundle: ${e.message}")
+                throw java.io.IOException("Falha ao extrair pacote Xvfb", e)
             }
         }
 
@@ -332,7 +333,7 @@ object RootFs {
                 dest.setExecutable(true, false)
                 dest.setReadable(true, false)
             } catch (e: Exception) {
-                Log.w(TAG, "glibc asset $lib not found: ${e.message}")
+                throw java.io.IOException("Falha ao extrair biblioteca $lib", e)
             }
         }
         File(x86LibDir, "libaudio_trace.so").delete()
@@ -368,7 +369,7 @@ object RootFs {
             dest.setExecutable(true, false)
             dest.setReadable(true, false)
         } catch (e: Exception) {
-            Log.w(TAG, "DNS resolver shim not found: ${e.message}")
+            throw java.io.IOException("Falha ao extrair DNS resolver", e)
         }
 
         try {
@@ -385,7 +386,7 @@ object RootFs {
             copyAssetCounted(ctx, "x86_64-libs/libX11_stub.so", File(x86LibDir, "libX11.so.6"), progress)
             File(x86LibDir, "libX11.so.6").setExecutable(true, false)
         } catch (e: Exception) {
-            Log.w(TAG, "libX11_stub.so not found in assets: ${e.message}")
+            throw java.io.IOException("Falha ao extrair libX11_stub.so", e)
         }
 
         for (so in listOf("libpthread_recursive_fix.so", "libctype_fix.so", "libgodot_ctype_patch.so", "libeaccess_shim.so", "libXrandr.so.2", "libXi.so.6", "libXinerama.so.1", "libXrender.so.1", "libasound.so.2")) {
@@ -394,7 +395,7 @@ object RootFs {
                 copyAssetCounted(ctx, "x86_64-libs/$so", dest, progress)
                 dest.setReadable(true, false)
             } catch (e: Exception) {
-                Log.w(TAG, "godot shim $so not found: ${e.message}")
+                throw java.io.IOException("Falha ao extrair biblioteca $so", e)
             }
         }
 
@@ -456,6 +457,13 @@ object RootFs {
             }
         }
 
+        // Repair the three hard links extracted as empty files by older versions.
+        val rules = File(root, "usr/share/X11/xkb/rules")
+        for (suffix in listOf("", ".lst", ".xml")) {
+            val source = File(rules, "base$suffix")
+            val target = File(rules, "xorg$suffix")
+            if (source.isFile && target.length() == 0L) source.copyTo(target, overwrite = true)
+        }
         File(root, ".pd_libs_version").writeText(LIBS_VERSION.toString())
         Log.i(TAG, "Library extraction complete")
     }

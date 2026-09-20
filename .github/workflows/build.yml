@@ -47,19 +47,22 @@ jobs:
       - name: Build x86 libs
         run: bash scripts/build-x86.sh
 
+      - name: Test rootfs preparation
+        run: python3 scripts/test-fetch-rootfs.py
+
       - name: Fetch assets
-        run: bash scripts/fetch-assets.sh
+        run: bash scripts/fetch-rootfs.sh
 
       - uses: gradle/actions/setup-gradle@v4
 
       - name: assembleDebug
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleDebug --stacktrace
+          ./gradlew testDebugUnitTest assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: polydroid2-debug
+          name: robloxdroid-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error

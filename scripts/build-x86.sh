@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "$(gcc -dumpmachine)" != x86_64* ]]; then
+  echo "Use um gcc x86_64: os shims são do convidado, não bibliotecas ARM64." >&2
+  exit 1
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CPP="$ROOT/app/src/main/cpp"
 GLIBC_OUT="$ROOT/app/src/main/assets/glibc-x86_64"

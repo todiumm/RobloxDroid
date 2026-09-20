@@ -37,7 +37,7 @@ cliente Linux nativo" de "rodar um programa Windows".
 
 ## Fluxo de uso
 
-1. Instale o APK e abra o app — o rootfs (Ubuntu 22.04 arm64) é extraído.
+1. Instale o APK e abra o app — o rootfs customizado do PolyDroid2 é extraído.
 2. Toque em **"Instalar componentes"**:
    - Wine x86_64 (Kron4ek Wine-Builds) é baixado do GitHub;
    - DXVK x64 é baixado do GitHub;
@@ -52,7 +52,7 @@ cliente Linux nativo" de "rodar um programa Windows".
 
 Copie um `RobloxStudio.zip` (sua própria cópia — ex.: build de pesquisa 2016)
 para `Android/data/com.robloxdroid.studio/files/import/` e use
-**Configurações → Componentes → Import** (ou o botão correspondente). Veja
+**Configurações → Client → Componentes → Importar RobloxStudio.zip**. Veja
 `docs/LEGAL.md` para os limites legais disso.
 
 ## Estrutura do projeto
@@ -79,9 +79,12 @@ scripts/build-x86.sh      # recompila os shims x86_64 (requer gcc x86_64)
 Veja **[docs/COMPILAR.md](docs/COMPILAR.md)**. Resumo:
 
 ```bash
-./scripts/fetch-rootfs.sh        # baixa o rootfs base (~50 MB → assets)
-./gradlew assembleDebug          # Android Studio ou SDK + NDK r26+
+bash scripts/fetch-rootfs.sh     # opcional: prepara/verifica o rootfs (~119 MB)
+./gradlew assembleDebug          # também prepara o rootfs automaticamente
 ```
+
+O rootfs não é versionado no Git. O download é verificado pelo SHA-256 de
+`rootfs.properties`, tanto no script quanto no build Gradle.
 
 > ⚠️ **Pré-requisito não óbvio:** os binários `libbox64.so`, `libXlorie.so` e
 > os shims `glibc-x86_64/*.so` precisam existir (já estão neste repositório,

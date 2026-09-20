@@ -118,6 +118,12 @@ class CustomKeysOverlay(
                 }
             }
             MotionEvent.ACTION_CANCEL -> {
+                for (b in buttons) {
+                    if (b.toggleActive) {
+                        sendKey(b.ck.scanCode, false)
+                        b.toggleActive = false
+                    }
+                }
                 for (pi in 0 until event.pointerCount) {
                     val id = event.getPointerId(pi)
                     if (release(id)) continue
@@ -126,6 +132,15 @@ class CustomKeysOverlay(
             }
         }
         return true
+    }
+
+    override fun onDetachedFromWindow() {
+        for (b in buttons) {
+            if (b.toggleActive || b.pointerId != -1) sendKey(b.ck.scanCode, false)
+            b.toggleActive = false
+            b.pointerId = -1
+        }
+        super.onDetachedFromWindow()
     }
 
     override fun onDraw(canvas: Canvas) {

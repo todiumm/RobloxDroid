@@ -63,73 +63,90 @@ class LauncherActivity : AppCompatActivity() {
 
         refreshStatus(status)
 
-        if (RootFs.needsExtraction(this)) {
-            extractionInProgress = true
-            val detailBar = ProgressBar(
-                this, null, android.R.attr.progressBarStyleHorizontal
-            ).apply {
-                isIndeterminate = false
-                max = 100
-                progress = 0
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
-            }
-            val detailText = TextView(this).apply {
-                text = ""
-                setPadding(0, 16, 0, 0)
-            }
-            val dialogView = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(64, 48, 64, 48)
-                addView(detailBar)
-                addView(detailText)
-            }
-            val dialog = MaterialAlertDialogBuilder(this)
-                .setTitle("Extraindo arquivos...")
-                .setView(dialogView)
-                .setCancelable(false)
-                .create()
-            dialog.setCanceledOnTouchOutside(false)
-            dialog.show()
+        if (RootFs.needsExtraction(this)) startRootfsExtraction(status)
+    }
 
-            // A extração descomprime XZ em Java puro (sem aceleração nativa) — em
-            // aparelhos mais fracos isso pode levar vários minutos. Sem wake lock,
-            // se a tela apagar/bloquear o sistema entra em Doze e o processamento
-            // em background quase para, o que parece "travado para sempre" mesmo
-            // sem ter travado de verdade. Mantém a CPU acordada e a tela ligada
-            // enquanto a extração roda.
-            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            val powerManager = getSystemService(POWER_SERVICE) as PowerManager
-            val wakeLock = powerManager.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK, "RobloxDroid:rootfsExtraction"
+    private fun startRootfsExtraction(status: TextView) {
+        if (extractionInProgress) return
+        extractionInProgress = true
+        refreshStatus(status)
+        val detailBar = ProgressBar(
+            this, null, android.R.attr.progressBarStyleHorizontal
+        ).apply {
+            isIndeterminate = false
+            max = 100
+            progress = 0
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
-            wakeLock.acquire(30 * 60 * 1000L /* 30 min de teto de segurança */)
+        }
+        val detailText = TextView(this).apply {
+            text = ""
+            setPadding(0, 16, 0, 0)
+        }
+        val dialogView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(64, 48, 64, 48)
+            addView(detailBar)
+            addView(detailText)
+        }
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle("Extraindo arquivos...")
+            .setView(dialogView)
+            .setCancelable(false)
+            .create()
+        dialog.setCanceledOnTouchOutside(false)
+        dialog.show()
 
-            thread {
-                RootFs.extractAll(this) { detailPct, _, _, stageLabel, bytesDone, totalBytes ->
+        // A extração descomprime XZ em Java puro (sem aceleração nativa) — em
+        // aparelhos mais fracos isso pode levar vários minutos. Sem wake lock,
+        // se a tela apagar/bloquear o sistema entra em Doze e o processamento
+        // em background quase para, o que parece "travado para sempre" mesmo
+        // sem ter travado de verdade. Mantém a CPU acordada e a tela ligada
+        // enquanto a extração roda.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+        val wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK, "RobloxDroid:rootfsExtraction"
+        )
+        wakeLock.acquire(30 * 60 * 1000L /* 30 min de teto de segurança */)
+
+        thread {
+            var failure: Exception? = null
+            try {
+                RootFs.extractAll(applicationContext) { detailPct, _, _, stageLabel, bytesDone, totalBytes ->
                     runOnUiThread {
-                        dialog.setTitle(stageLabel)
-                        if (totalBytes > 0) {
-                            detailBar.isIndeterminate = false
+                        if (!isFinishing && !isDestroyed) {
+                            dialog.setTitle(stageLabel)
+                            detailBar.isIndeterminate = totalBytes <= 0
                             detailBar.progress = detailPct
-                            detailText.text = "${bytesDone / 1_048_576} MB / ${totalBytes / 1_048_576} MB"
-                        } else {
-                            // Tamanho total desconhecido (ver RootFs.assetLen) — barra
-                            // indeterminada em vez de ficar travada mostrando 0%.
-                            detailBar.isIndeterminate = true
-                            detailText.text = "${bytesDone / 1_048_576} MB extraídos..."
+                            detailText.text = if (totalBytes > 0)
+                                "${bytesDone / 1_048_576} MB / ${totalBytes / 1_048_576} MB"
+                            else "${bytesDone / 1_048_576} MB extraídos…"
                         }
                     }
                 }
+            } catch (e: Exception) {
+                failure = e
+                Log.e(TAG, "Extração do rootfs falhou", e)
+            } finally {
+                if (wakeLock.isHeld) wakeLock.release()
+                val error = failure
                 runOnUiThread {
-                    dialog.dismiss()
-                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    if (wakeLock.isHeld) wakeLock.release()
                     extractionInProgress = false
-                    refreshStatus(status)
-                    kickoffUpdateCheck()
+                    if (!isFinishing && !isDestroyed) {
+                        dialog.dismiss()
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        refreshStatus(status)
+                        if (error == null) kickoffUpdateCheck()
+                        else MaterialAlertDialogBuilder(this)
+                            .setTitle("Falha ao preparar o ambiente")
+                            .setMessage(error.message ?: error.toString())
+                            .setPositiveButton("Tentar novamente") { _, _ -> startRootfsExtraction(status) }
+                            .setNegativeButton("Fechar", null)
+                            .show()
+                    }
                 }
             }
         }
@@ -144,16 +161,25 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     private fun refreshStatus(status: TextView) {
+        val ready = !RootFs.needsExtraction(this)
+        val busy = extractionInProgress || installInProgress
+        findViewById<android.view.View>(R.id.btn_install).isEnabled = ready && !busy
+        findViewById<android.view.View>(R.id.btn_settings).isEnabled = ready && !busy
         val wine = StudioDownloader.wineInstalledVersion(this) != null
+        val dxvk = StudioDownloader.dxvkInstalledVersion(this) != null
         val prefix = StudioDownloader.prefixReady(this)
         val studio = Box64Launcher.findStudioExe(this) != null
         status.text = when {
+            extractionInProgress -> "Preparando ambiente…"
+            !ready -> "Ambiente incompleto — reabra o app para tentar novamente"
+            installInProgress -> "Instalando componentes…"
+            wine && !dxvk -> "Wine pronto — falta instalar o DXVK"
             studio && wine && prefix -> "Pronto: Roblox Studio ${StudioDownloader.studioInstalledVersion(this) ?: "(importado)"}"
             wine && prefix -> "Wine pronto — falta instalar o Roblox Studio"
             wine -> "Wine pronto — falta inicializar o prefixo (Instalar componentes)"
             else -> "Componentes não instalados — toque em \"Instalar componentes\""
         }
-        btnPlayState(studio && wine && prefix)
+        btnPlayState(ready && !busy && studio && wine && prefix && dxvk)
     }
 
     private fun btnPlayState(enabled: Boolean) {
@@ -174,7 +200,9 @@ class LauncherActivity : AppCompatActivity() {
      */
     private fun installComponents() {
         if (installInProgress || extractionInProgress) return
+        if (RootFs.needsExtraction(this)) return
         installInProgress = true
+        refreshStatus(findViewById(R.id.launcher_status))
         val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             isIndeterminate = false
             max = 100
@@ -196,6 +224,7 @@ class LauncherActivity : AppCompatActivity() {
 
         fun progress(pct: Int, text: String) {
             runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
                 label.text = text
                 if (pct >= 0) {
                     bar.isIndeterminate = false
@@ -216,15 +245,17 @@ class LauncherActivity : AppCompatActivity() {
                 }
                 StudioDownloader.installOfficialStudio(this) { p, l -> progress(p, l) }
                 runOnUiThread {
-                    dialog.dismiss()
                     installInProgress = false
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    dialog.dismiss()
                     refreshStatus(findViewById(R.id.launcher_status))
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "instalação falhou", e)
                 runOnUiThread {
-                    dialog.dismiss()
                     installInProgress = false
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    dialog.dismiss()
                     refreshStatus(findViewById(R.id.launcher_status))
                     MaterialAlertDialogBuilder(this)
                         .setTitle("Falha na instalação")

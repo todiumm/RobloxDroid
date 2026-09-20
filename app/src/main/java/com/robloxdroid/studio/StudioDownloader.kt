@@ -72,8 +72,11 @@ object StudioDownloader {
     fun studioDir(ctx: Context): File = File(prefixDir(ctx), "drive_c/users/user/AppData/Local/Roblox/Versions")
 
     fun wineInstalledVersion(ctx: Context): String? = markerOf(File(RootFs.rootDir(ctx), MARKER_WINE))
+        ?.takeIf { listOf("wine64", "wine").any { elfX8664(File(wineDir(ctx), "bin/$it")) } }
     fun dxvkInstalledVersion(ctx: Context): String? = markerOf(File(RootFs.rootDir(ctx), MARKER_DXVK))
-    fun prefixReady(ctx: Context): Boolean = File(RootFs.rootDir(ctx), MARKER_PREFIX).exists()
+        ?.takeIf { DLLS.all { File(dxvkDir(ctx), "x64/$it").length() > 0 } }
+    fun prefixReady(ctx: Context): Boolean = File(RootFs.rootDir(ctx), MARKER_PREFIX).isFile &&
+        File(prefixDir(ctx), "system.reg").isFile
     fun studioInstalledVersion(ctx: Context): String? = markerOf(File(studioDir(ctx), MARKER_STUDIO))
 
     private fun markerOf(f: File): String? =
@@ -124,22 +127,6 @@ object StudioDownloader {
     // acessos seguintes são RELATIVOS. Trocar a string embutida pela versão
     // relativa move o socket para $WINEPREFIX/.wine-<uid>/server-<hash>, que é
     // gravável pelo app. Patch em bytes, mesmo tamanho (padding NUL), idempotente.
-    private const val WS_ORIG_PREFIX = "/tmp/.wine-"
-
-    private fun bytesIndexOf(hay: ByteArray, needle: ByteArray, from: Int = 0): Int {
-        if (needle.isEmpty()) return from
-        val last = hay.size - needle.size
-        var i = from
-        while (i <= last) {
-            if (hay[i] == needle[0]) {
-                var j = 1
-                while (j < needle.size && hay[i + j] == needle[j]) j++
-                if (j == needle.size) return i
-            }
-            i++
-        }
-        return -1
-    }
 
     /**
      * Move o socket do wineserver de /tmp/.wine-<uid> para
@@ -163,24 +150,14 @@ object StudioDownloader {
             }
             try {
                 val data = f.readBytes()
-                val orig = origStr.toByteArray(Charsets.ISO_8859_1).plus(0.toByte())  // inclui o NUL terminador
-                val idx = bytesIndexOf(data, orig)
-                if (idx >= 0) {
-                    val newStr = origStr.removePrefix(WS_ORIG_PREFIX).toByteArray(Charsets.ISO_8859_1)
-                    val out = data.copyOf()
-                    // mesma região original: nova string + padding NUL (mantém tamanho/offsets)
-                    System.arraycopy(newStr, 0, out, idx, newStr.size)
-                    java.util.Arrays.fill(out, idx + newStr.size, idx + orig.size, 0.toByte())
-                    f.writeBytes(out)
-                    onLog("Patch socket: $nome → .wine-<uid> dentro da WINEPREFIX (Android não tem /tmp)")
-                    Log.i(TAG, "patchWineTmpSocket: $nome patched (offset $idx)")
+                val patched = WineSocketPatch.apply(data, origStr)
+                if (patched == null) {
+                    onLog("Aviso: padrão do socket não encontrado em $nome (Wine customizado)")
+                } else if (!patched.contentEquals(data)) {
+                    f.writeBytes(patched)
+                    onLog("Patch socket aplicado em $nome: .wine-<uid> dentro do prefixo")
                 } else {
-                    // original ausente: ou já patcheado, ou Wine diferente do esperado
-                    val already = origStr.removePrefix(WS_ORIG_PREFIX).toByteArray(Charsets.ISO_8859_1).plus(0.toByte())
-                    onLog(
-                        if (bytesIndexOf(data, already) >= 0) "Patch socket: $nome já aplicado"
-                        else "Aviso: padrão do socket não encontrado em $nome (Wine diferente do Kron4ek 9.0?) — seguindo"
-                    )
+                    onLog("Patch socket: $nome já aplicado")
                 }
             } catch (e: Exception) {
                 onLog("Aviso: patch do socket falhou em $nome: ${e.message}")
@@ -208,57 +185,23 @@ object StudioDownloader {
     }
 
     private fun extractTar(tar: TarArchiveInputStream, destDir: File, stripFirst: Boolean) {
-        destDir.mkdirs()
-        while (true) {
-            val entry = tar.nextEntry ?: break
-            val rel = if (stripFirst) entry.name.substringAfter('/', entry.name) else entry.name
-            if (rel.isBlank() || rel.startsWith("..")) continue
-            val out = File(destDir, rel)
-            if (entry.isDirectory) {
-                out.mkdirs()
-            } else if (entry.isSymbolicLink) {
-                try {
-                    out.parentFile?.mkdirs()
-                    java.nio.file.Files.createSymbolicLink(
-                        out.toPath(), java.nio.file.Paths.get(entry.linkName)
-                    )
-                } catch (e: Exception) {
-                    Log.w(TAG, "symlink falhou: ${entry.name} -> ${entry.linkName}")
-                }
-            } else {
-                out.parentFile?.mkdirs()
-                tar.copyTo(out.outputStream())
-                if (entry.mode and 0b001_001_001 != 0) out.setExecutable(true, false)
-                out.setReadable(true, false)
-            }
-        }
+        ArchiveFiles.extractTar(tar, destDir, stripFirst)
     }
 
     private fun extractZip(archive: File, destDir: File, onProgress: (Int) -> Unit) {
-        destDir.mkdirs()
         ZipInputStream(BufferedInputStream(archive.inputStream(), 65536)).use { zip ->
             var count = 0
-            while (true) {
-                val e = zip.nextEntry ?: break
-                val out = File(destDir, e.name)
-                if (!out.canonicalPath.startsWith(destDir.canonicalPath)) {
-                    throw IOException("zip suspeito: ${e.name}")
-                }
-                if (e.isDirectory) out.mkdirs()
-                else {
-                    out.parentFile?.mkdirs()
-                    zip.copyTo(out.outputStream())
-                    out.setReadable(true, false)
-                    out.setWritable(true, false)
-                }
-                if (++count % 200 == 0) onProgress(-1)
-            }
+            ArchiveFiles.extractZip(zip, destDir) { if (++count % 200 == 0) onProgress(-1) }
         }
     }
 
     // ---------------------------------------------------------------- 1) Wine
+    @Synchronized
     fun ensureWine(ctx: Context, onProgress: (Int, String) -> Unit) {
-        if (wineInstalledVersion(ctx) != null) return
+        if (wineInstalledVersion(ctx) != null) {
+            patchWineTmpSocket(ctx) { onProgress(-1, it) }
+            return
+        }
         val prefs = ctx.getSharedPreferences(SettingsActivity.PREFS_NAME, Context.MODE_PRIVATE)
         val url = prefs.getString(SettingsActivity.KEY_WINE_URL, WINE_URL_DEFAULT) ?: WINE_URL_DEFAULT
         val ver = prefs.getString(SettingsActivity.KEY_WINE_VERSION, WINE_VERSION_DEFAULT) ?: WINE_VERSION_DEFAULT
@@ -269,21 +212,27 @@ object StudioDownloader {
 
         onProgress(0, "Extraindo Wine…")
         val dest = wineDir(ctx)
-        dest.deleteRecursively()
-        // Kron4ek empacota como wine-9.0-amd64/bin/... → strip do 1º nível faz
-        // os binários caírem direto em opt/wine/bin
-        extractTarXz(tmp, dest, stripFirst = true)
-        // garante que binários marcados como executáveis sobreviveram
-        File(dest, "bin").listFiles()?.forEach { it.setExecutable(true, false) }
-        File(dest, "lib").listFiles()?.forEach { it.setReadable(true, false) }
-        tmp.delete()
-        // Android não tem /tmp: move o socket do wineserver para a WINEPREFIX
-        patchWineTmpSocket(ctx) { m -> onProgress(-1, m) }
-        setMarker(File(RootFs.rootDir(ctx), MARKER_WINE), ver)
+        val staged = File(dest.parentFile, ".wine-install-${java.util.UUID.randomUUID()}")
+        try {
+            // Kron4ek: wine-9.0-amd64/bin/... → opt/wine/bin.
+            extractTarXz(tmp, staged, stripFirst = true)
+            if (listOf("wine64", "wine").none { elfX8664(File(staged, "bin/$it")) }) {
+                throw IOException("Pacote Wine sem loader ELF x86_64")
+            }
+            File(staged, "bin").listFiles()?.forEach { it.setExecutable(true, false) }
+            ArchiveFiles.replaceDirectory(staged, dest)
+            // Android não tem /tmp: move o socket do wineserver para a WINEPREFIX.
+            patchWineTmpSocket(ctx) { onProgress(-1, it) }
+            setMarker(File(RootFs.rootDir(ctx), MARKER_WINE), ver)
+        } finally {
+            staged.deleteRecursively()
+            tmp.delete()
+        }
         Log.i(TAG, "Wine $ver instalado em ${dest.absolutePath}")
     }
 
     // ---------------------------------------------------------------- 2) DXVK
+    @Synchronized
     fun ensureDxvk(ctx: Context, onProgress: (Int, String) -> Unit) {
         if (dxvkInstalledVersion(ctx) != null) return
         val prefs = ctx.getSharedPreferences(SettingsActivity.PREFS_NAME, Context.MODE_PRIVATE)
@@ -296,16 +245,25 @@ object StudioDownloader {
 
         onProgress(0, "Extraindo DXVK…")
         val dest = dxvkDir(ctx)
-        dest.deleteRecursively()
-        extractTarGz(tmp, dest, stripFirst = true)
-        // dxvk-2.4/x64/*.dll → opt/dxvk/x64
-        val x64 = File(dest, "x64")
-        if (!x64.isDirectory) {
-            // alguns pacotes vêm soltos; procura d3d11.dll
-            dest.walkTopDown().filter { it.name == "d3d11.dll" }.firstOrNull()?.parentFile?.let { it.renameTo(File(dest, "x64")) }
+        val staged = File(dest.parentFile, ".dxvk-install-${java.util.UUID.randomUUID()}")
+        try {
+            extractTarGz(tmp, staged, stripFirst = true)
+            val x64 = File(staged, "x64")
+            if (!x64.isDirectory) {
+                val source = staged.walkTopDown().firstOrNull {
+                    it.isDirectory && DLLS.all { dll -> File(it, dll).length() > 0L }
+                } ?: throw IOException("Pacote DXVK sem DLLs")
+                x64.mkdirs()
+                for (dll in DLLS) File(source, dll).copyTo(File(x64, dll))
+            }
+            if (DLLS.any { File(x64, it).length() == 0L }) throw IOException("Pacote DXVK incompleto")
+            ArchiveFiles.replaceDirectory(staged, dest)
+            if (prefixReady(ctx)) installDxvkIntoPrefix(ctx) { Log.i(TAG, it) }
+            setMarker(File(RootFs.rootDir(ctx), MARKER_DXVK), ver)
+        } finally {
+            staged.deleteRecursively()
+            tmp.delete()
         }
-        tmp.delete()
-        setMarker(File(RootFs.rootDir(ctx), MARKER_DXVK), ver)
         Log.i(TAG, "DXVK $ver instalado em ${dest.absolutePath}")
     }
 
@@ -358,11 +316,15 @@ object StudioDownloader {
      * Executa `wineboot --init` (via Box64 + wine64) para criar o WINEPREFIX.
      * Roda em thread de chamador; pode levar vários minutos em aparelhos lentos.
      */
+    @Synchronized
     fun ensurePrefix(ctx: Context, onLog: (String) -> Unit) {
         val root = RootFs.rootDir(ctx)
-        if (prefixReady(ctx) && File(prefixDir(ctx), "system.reg").exists()) return
+        patchWineTmpSocket(ctx, onLog)
+        if (prefixReady(ctx)) {
+            installDxvkIntoPrefix(ctx, onLog)
+            return
+        }
         val env = Box64Launcher.guestEnv(ctx).toMutableMap()
-        val envArr = System.getenv().map { (k, v) -> "$k=$v" }.toTypedArray()
         val loader = wineLoaderBin(ctx)
         val nativeDir = ctx.applicationInfo.nativeLibraryDir
         val box64 = File(nativeDir, "libbox64.so")
@@ -391,11 +353,6 @@ object StudioDownloader {
         // faltar — o cliente criaria, mas não dependa disso
         File(root, "wineprefix").mkdirs()
 
-        // PATCH CRÍTICO (erro "código 1"): Android não tem /tmp — sem isto o
-        // wineserver morre com "mkdir /tmp/.wine-NNN: No such file or directory".
-        // Cobre também instalações de Wine feitas por versões anteriores do app.
-        patchWineTmpSocket(ctx, onLog)
-
         // evita diálogos do mono/gecko no primeiro boot
         val overrides = "mscoree,mshtml="
 
@@ -404,33 +361,28 @@ object StudioDownloader {
             script.parentFile?.mkdirs()
             script.writeText(
                 "#!/bin/sh\n" +
-                env.entries.joinToString("\n") { (k, v) -> "export $k=\"$v\"" } +
+                env.entries.joinToString("\n") { (k, v) -> "export $k=${StudioFiles.shellQuote(v)}" } +
                 "\nexport WINEDLLOVERRIDES=\"$overrides\"\n" +
-                "cd \"${root.absolutePath}/tmp\"\nexec " + cmd.joinToString(" ") + "\n"
+                "cd \"${root.absolutePath}/tmp\"\nexec " + cmd.joinToString(" ") { StudioFiles.shellQuote(it) } + "\n"
             )
             script.setExecutable(true, false)
             onLog("Executando: ${cmd.last()}")
-            val p = Runtime.getRuntime().exec(arrayOf("/system/bin/sh", script.absolutePath), envArr, root)
             val logFile = File(root, "tmp/setup_wine.log")
-            val outT = Thread {
-                p.inputStream.bufferedReader().lineSequence().forEach {
-                    onLog(it); logFile.appendText("$it\n")
-                }
+            logFile.writeText("")
+            val p = ProcessBuilder("/system/bin/sh", script.absolutePath)
+                .directory(root).redirectErrorStream(true).redirectOutput(logFile).start()
+            if (!p.waitFor(10, TimeUnit.MINUTES)) {
+                p.destroyForcibly()
+                throw IOException("wineboot excedeu 10 minutos; consulte setup_wine.log")
             }
-            val errT = Thread {
-                p.errorStream.bufferedReader().lineSequence().forEach {
-                    onLog(it); logFile.appendText("$it\n")
-                }
-            }
-            outT.start(); errT.start()
-            val code = p.waitFor()
-            outT.join(); errT.join()
+            val code = p.exitValue()
+            logFile.useLines { lines -> lines.forEach(onLog) }
             return code
         }
 
         // Kron4ek: `wineboot` é script #!/bin/sh e `wine` é i386 — executar o
         // loader x86_64 (wine64) direto no Box64 evita o exit 255.
-        val code = run(listOf("\"$box64\"", "\"$loader\"", "wineboot", "--init"))
+        val code = run(listOf(box64.absolutePath, loader.absolutePath, "wineboot", "--init"))
         onLog("wineboot saiu com código $code")
         val sysReg = File(prefixDir(ctx), "system.reg")
         if (!sysReg.exists()) {
@@ -447,7 +399,6 @@ object StudioDownloader {
         }
         if (sysReg.exists()) {
             if (code != 0) onLog("Aviso: wineboot saiu com código $code, mas o prefixo foi criado — seguindo")
-            setMarker(File(root, MARKER_PREFIX), "1")
         } else {
             // anexa o fim do log à mensagem — sem isso o diagnóstico fica cego
             val log = File(root, "tmp/setup_wine.log")
@@ -461,14 +412,14 @@ object StudioDownloader {
             )
         }
         installDxvkIntoPrefix(ctx, onLog)
+        setMarker(File(root, MARKER_PREFIX), "1")
     }
 
     /** Copia as DLLs do DXVK para o system32 do prefixo. */
     private fun installDxvkIntoPrefix(ctx: Context, onLog: (String) -> Unit) {
         val x64 = File(dxvkDir(ctx), "x64")
-        if (!x64.isDirectory) {
-            onLog("DXVK ausente — pulando cópia de DLLs")
-            return
+        if (DLLS.any { File(x64, it).length() == 0L }) {
+            throw IOException("DXVK incompleto — instale o DXVK antes de preparar o prefixo")
         }
         val sys32 = File(prefixDir(ctx), "drive_c/windows/system32")
         sys32.mkdirs()
@@ -488,6 +439,7 @@ object StudioDownloader {
      * Instalação oficial: consulta o canal Studio da Roblox e baixa o zip
      * (mesma origem usada pelo launcher oficial do Windows).
      */
+    @Synchronized
     fun installOfficialStudio(ctx: Context, onProgress: (Int, String) -> Unit): String {
         val prefs = ctx.getSharedPreferences(SettingsActivity.PREFS_NAME, Context.MODE_PRIVATE)
         // Migração: se a pref guardou o canal/zip antigos (aposentados pela
@@ -517,7 +469,8 @@ object StudioDownloader {
                 ?: json.optString("version").takeIf { it.isNotBlank() }
                 ?: throw IOException("resposta sem 'clientVersionUpload': ${body.take(200)}")
         }
-        if (version == studioInstalledVersion(ctx)) {
+        val dest = StudioFiles.versionDirectory(studioDir(ctx), version)
+        if (version == studioInstalledVersion(ctx) && StudioFiles.findExe(dest) != null) {
             onProgress(100, "Studio $version já instalado")
             return version
         }
@@ -528,37 +481,43 @@ object StudioDownloader {
         download(zipUrl, tmp) { onProgress(it, "Baixando Studio $version…") }
 
         onProgress(0, "Extraindo Studio…")
-        // evita "version-version-<hash>" quando o canal devolve clientVersionUpload
-        val dest = File(studioDir(ctx), "version-" + version.removePrefix("version-"))
-        dest.deleteRecursively()
-        extractZip(tmp, dest) { onProgress(-1, "Extraindo Studio…") }
+        installStudioArchive(ctx, tmp, dest, version) { onProgress(-1, "Extraindo Studio…") }
         tmp.delete()
-        dest.listFiles()?.forEach { if (it.isFile) it.setWritable(false) }
-        setMarker(File(studioDir(ctx), MARKER_STUDIO), version)
-        try { StudioPrefs.applyTo(ctx, RootFs.rootDir(ctx), Box64Launcher.findStudioExe(ctx) ?: return version) } catch (_: Exception) {}
         onProgress(100, "Studio $version instalado")
         return version
     }
 
     /** Import manual: usuário coloca um zip do Studio (ou pasta) em Android/data/.../files/import. */
+    @Synchronized
     fun importStudio(ctx: Context, archive: File, onProgress: (Int, String) -> Unit): String {
-        val version = "import-" + java.text.SimpleDateFormat("yyyyMMdd-HHmmss").format(java.util.Date())
+        val version = "import-${java.util.UUID.randomUUID()}"
         onProgress(0, "Importando ${archive.name}…")
-        val dest = File(studioDir(ctx), "version-$version")
-        extractZip(archive, dest) { onProgress(-1, "Importando ${archive.name}…") }
-        val exe = dest.walkTopDown()
-            .filter { it.isFile && it.name.equals("RobloxStudioBeta.exe", ignoreCase = true) }
-            .firstOrNull() ?: throw IOException("RobloxStudioBeta.exe não encontrado no arquivo importado")
-        setMarker(File(studioDir(ctx), MARKER_STUDIO), version)
-        try { StudioPrefs.applyTo(ctx, RootFs.rootDir(ctx), exe) } catch (_: Exception) {}
+        val dest = StudioFiles.versionDirectory(studioDir(ctx), version)
+        installStudioArchive(ctx, archive, dest, version) { onProgress(-1, "Importando ${archive.name}…") }
         onProgress(100, "Importado: $version")
         return version
     }
 
+    private fun installStudioArchive(ctx: Context, archive: File, dest: File, version: String, progress: () -> Unit) {
+        val staged = File(dest.parentFile, ".install-${java.util.UUID.randomUUID()}")
+        try {
+            extractZip(archive, staged) { progress() }
+            val exe = StudioFiles.findExe(staged)
+                ?: throw IOException("RobloxStudioBeta.exe não encontrado no arquivo")
+            StudioPrefs.applyTo(ctx, RootFs.rootDir(ctx), exe)
+            ArchiveFiles.replaceDirectory(staged, dest)
+            setMarker(File(studioDir(ctx), MARKER_STUDIO), version)
+        } finally {
+            staged.deleteRecursively()
+        }
+    }
+
+    @Synchronized
     fun deleteStudio(ctx: Context) {
         studioDir(ctx).deleteRecursively()
     }
 
+    @Synchronized
     fun deleteWine(ctx: Context) {
         wineDir(ctx).deleteRecursively()
         dxvkDir(ctx).deleteRecursively()

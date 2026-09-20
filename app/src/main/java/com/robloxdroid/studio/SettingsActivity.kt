@@ -341,8 +341,8 @@ class SettingsActivity : AppCompatActivity() {
             val prefs = ctx.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             val customEnabled = prefs.getBoolean(KEY_CUSTOM_ENABLED, false)
             return if (customEnabled) {
-                val w = prefs.getInt(KEY_CUSTOM_WIDTH, 1280)
-                val h = prefs.getInt(KEY_CUSTOM_HEIGHT, 720)
+                val w = prefs.getInt(KEY_CUSTOM_WIDTH, 1280).coerceIn(320, 7680)
+                val h = prefs.getInt(KEY_CUSTOM_HEIGHT, 720).coerceIn(240, 4320)
                 Triple(true, w, h)
             } else {
                 val shortEdge = prefs.getInt(KEY_RESOLUTION, DEFAULT_RESOLUTION)
@@ -589,8 +589,8 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         val saveCustom = {
-            val w = widthEdit.text.toString().toIntOrNull() ?: 1280
-            val h = heightEdit.text.toString().toIntOrNull() ?: 720
+            val w = (widthEdit.text.toString().toIntOrNull() ?: 1280).coerceIn(320, 7680)
+            val h = (heightEdit.text.toString().toIntOrNull() ?: 720).coerceIn(240, 4320)
             prefs.edit().putInt(KEY_CUSTOM_WIDTH, w).putInt(KEY_CUSTOM_HEIGHT, h).apply()
         }
         widthEdit.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) saveCustom() }
@@ -714,7 +714,12 @@ class SettingsActivity : AppCompatActivity() {
                 { onProgress: (Int, String) -> Unit -> StudioDownloader.ensureDxvk(this) { p, l -> onProgress(p, l) } }),
             StudioComponentRow("Roblox Studio (canal oficial)",
                 { studioInstalledLabel() },
-                { onProgress: (Int, String) -> Unit -> StudioDownloader.installOfficialStudio(this) { p, l -> onProgress(p, l) } })
+                { onProgress: (Int, String) -> Unit ->
+                    StudioDownloader.ensureWine(this, onProgress)
+                    StudioDownloader.ensureDxvk(this, onProgress)
+                    StudioDownloader.ensurePrefix(this) { onProgress(-1, it) }
+                    StudioDownloader.installOfficialStudio(this, onProgress)
+                })
         )
         for ((idx, item) in rows.withIndex()) {
             if (idx > 0) {
@@ -724,6 +729,31 @@ class SettingsActivity : AppCompatActivity() {
             }
             storage.addView(buildStudioRow(item.title, item.statusLabel, item.install))
         }
+        val importButton = MaterialButton(this).apply {
+            text = "Importar RobloxStudio.zip"
+            setOnClickListener {
+                val archives = StudioDownloader.importDir(this@SettingsActivity).listFiles()
+                    ?.filter { it.isFile && it.extension.equals("zip", ignoreCase = true) }
+                    ?.sortedBy { it.name }.orEmpty()
+                if (archives.isEmpty()) {
+                    Toast.makeText(this@SettingsActivity, "Copie um ZIP para a pasta indicada abaixo", Toast.LENGTH_LONG).show()
+                } else {
+                    com.google.android.material.dialog.MaterialAlertDialogBuilder(this@SettingsActivity)
+                        .setTitle("Escolha o ZIP do Studio")
+                        .setItems(archives.map { it.name }.toTypedArray()) { _, which ->
+                            runComponentInstall("Importar ${archives[which].name}", { progress ->
+                                StudioDownloader.ensureWine(this@SettingsActivity, progress)
+                                StudioDownloader.ensureDxvk(this@SettingsActivity, progress)
+                                StudioDownloader.ensurePrefix(this@SettingsActivity) { progress(-1, it) }
+                                StudioDownloader.importStudio(this@SettingsActivity, archives[which], progress)
+                            }) { recreate() }
+                        }
+                        .setNegativeButton("Cancelar", null)
+                        .show()
+                }
+            }
+        }
+        storage.addView(importButton, layoutParams())
         val importHint = TextView(this).apply {
             text = "Import manual: copie um RobloxStudio.zip para " + StudioDownloader.importDir(this@SettingsActivity).absolutePath
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
@@ -811,54 +841,70 @@ class SettingsActivity : AppCompatActivity() {
         }
         refresh()
 
-        fun showProgress() {
-            val dialogView = LinearLayout(this@SettingsActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(64, 48, 64, 48)
-                val bar = ProgressBar(this@SettingsActivity, null, android.R.attr.progressBarStyleHorizontal).apply {
-                    max = 100
-                }
-                val label = TextView(this@SettingsActivity).apply { text = "Preparando…" }
-                tag = "label"
-                addView(bar)
-                addView(label)
-                setTag(R.id.tag_progress_bar, bar)
-            }
-            val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(this@SettingsActivity)
-                .setTitle(title)
-                .setView(dialogView)
-                .setCancelable(false)
-                .create()
-            dialog.show()
-            Thread {
-                try {
-                    install { pct, lbl ->
-                        runOnUiThread {
-                            (dialogView.getTag(R.id.tag_progress_bar) as? ProgressBar)?.progress = pct.coerceAtLeast(0)
-                            (dialogView.getChildAt(1) as? TextView)?.text = lbl
-                        }
-                    }
-                    runOnUiThread {
-                        if (!isFinishing && !isDestroyed) {
-                            Toast.makeText(this@SettingsActivity, "$title concluído", Toast.LENGTH_SHORT).show()
-                            dialog.dismiss()
-                        }
-                        refresh()
-                    }
-                } catch (e: Exception) {
-                    Log.e("RobloxDroid", "install $title falhou", e)
-                    runOnUiThread {
-                        if (!isFinishing && !isDestroyed) {
-                            Toast.makeText(this@SettingsActivity, "$title: ${e.message}", Toast.LENGTH_LONG).show()
-                            dialog.dismiss()
-                        }
-                    }
-                }
-            }.start()
+        installBtn.setOnClickListener {
+            runComponentInstall(title, install) { refresh() }
         }
-
-        installBtn.setOnClickListener { showProgress() }
         return row
+    }
+
+    private var componentInstallInProgress = false
+
+    private fun runComponentInstall(
+        title: String,
+        install: ((Int, String) -> Unit) -> Unit,
+        onSuccess: () -> Unit,
+    ) {
+        if (componentInstallInProgress) return
+        if (RootFs.needsExtraction(this)) {
+            Toast.makeText(this, "Prepare o ambiente na tela inicial", Toast.LENGTH_LONG).show()
+            return
+        }
+        componentInstallInProgress = true
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100 }
+        val label = TextView(this).apply { text = "Preparando…" }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(16))
+            addView(bar)
+            addView(label)
+        }
+        val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle(title).setView(content).setCancelable(false).create()
+        dialog.show()
+        Thread {
+            var failure: Exception? = null
+            try {
+                install { pct, text ->
+                    runOnUiThread {
+                        if (!isFinishing && !isDestroyed) {
+                            bar.isIndeterminate = pct < 0
+                            bar.progress = pct.coerceAtLeast(0)
+                            label.text = text
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                failure = e
+                Log.e("RobloxDroid", "Instalação de $title falhou", e)
+            } finally {
+                val error = failure
+                runOnUiThread {
+                    componentInstallInProgress = false
+                    if (!isFinishing && !isDestroyed) {
+                        dialog.dismiss()
+                        if (error == null) {
+                            Toast.makeText(this, "$title concluído", Toast.LENGTH_SHORT).show()
+                            onSuccess()
+                        } else {
+                            com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                                .setTitle("Falha na instalação")
+                                .setMessage(error.message ?: error.toString())
+                                .setPositiveButton("OK", null).show()
+                        }
+                    }
+                }
+            }
+        }.start()
     }
 
     private fun iconButton(iconRes: Int, tint: Int): MaterialButton {
