@@ -13,7 +13,5 @@ local.properties
 # /ext contains external sources used for reference (SDL, Vulkan, Box64 etc.)
 /ext
 
-# assets over 50 MB
-app/src/main/assets/rootfs.tar.xz
 
 app/src/main/assets/.rootfs-*
